@@ -61,11 +61,6 @@ scripts/                helper scripts (load test, configuration)
 .github/workflows/      CI pipeline
 ```
 
-## Screenshots
-
-![ArgoCD application synced and healthy](docs/argocd-synced.png)
-![Grafana request rate](docs/grafana-metrics.png)
-![CI pipeline run](docs/ci-green.png)
 
 ## Running it yourself
 
