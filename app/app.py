@@ -9,7 +9,7 @@ REQUESTS = Counter("app_requests_total", "Total requests", ["endpoint"])
 @app.route("/")
 def index():
     REQUESTS.labels("/").inc()
-    return jsonify(message="Hello from DevOps GitOps demo",
+    return jsonify(message="Hello from DevOps GitOps practice",
                    version=os.getenv("APP_VERSION", "dev"))
 
 
