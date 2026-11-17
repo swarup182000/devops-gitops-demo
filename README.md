@@ -1,98 +1,128 @@
-# DevOps GitOps Demo (Kubernetes + Terraform + ArgoCD + GitHub Actions + Trivy + Prometheus/Grafana)
+# GitOps CI/CD Pipeline on Kubernetes
 
-Ek din mein hands-on karne layak end-to-end DevOps project. Sab kuch local machine par chalta hai (free).
+A small but complete DevOps project: a containerized Flask service that is tested, security-scanned, built and deployed automatically with a GitOps workflow. The cluster, ArgoCD and the monitoring stack are all provisioned with Terraform.
+
+I built and ran this end to end on an AWS EC2 instance (Ubuntu, `t3.large`, 30 GB disk) using a local `kind` cluster.
+
+## What it does
+
+Pushing a change to `app/` triggers the whole chain with no manual steps:
+
+1. GitHub Actions runs the unit tests.
+2. The Docker image is built and scanned with Trivy. The pipeline fails on CRITICAL vulnerabilities.
+3. The image is pushed to GitHub Container Registry, tagged with the commit SHA.
+4. The pipeline writes the new tag into `helm/demo-app/values.yaml` and commits it.
+5. ArgoCD detects the change in Git and rolls the new version out to the cluster.
+6. Prometheus scrapes the app's `/metrics` endpoint and Grafana visualises it.
 
 ## Architecture
 
 ```
-git push -> GitHub Actions (test -> build -> Trivy scan -> push GHCR -> helm values tag update)
-                                                        |
-                                                        v
-                         ArgoCD (Git watch karta hai) -> Kubernetes (kind) -> demo-app
-                                                        |
-                                    Prometheus + Grafana <- /metrics
-Terraform: kind cluster + ArgoCD + kube-prometheus-stack banata hai
+developer
+   |  git push
+   v
+GitHub repo ---> GitHub Actions
+                 test -> build -> Trivy scan -> push image (GHCR) -> bump tag in values.yaml
+   |
+   |  (ArgoCD watches the repo and pulls changes)
+   v
+ArgoCD ---> Kubernetes (kind) ---> demo-app (2 replicas)
+                                        |
+                                        | /metrics
+                                        v
+                              Prometheus ---> Grafana + alert rules
+
+Terraform provisions: kind cluster, ArgoCD, kube-prometheus-stack
 ```
 
-## Prerequisites
-Docker, Terraform (>=1.5), kubectl, git, ek GitHub account.
+CI never talks to the cluster. The cluster pulls its desired state from Git, which is the core idea of GitOps.
 
-## Steps (total ~5-6 ghante)
+## Tech stack
 
-### 1. Repo setup (20 min)
-1. GitHub par naya repo banao: `devops-gitops-demo` (**public** rakho).
-2. Is folder ko push karo:
+| Area | Tools |
+|------|-------|
+| App | Python, Flask, Gunicorn, prometheus-client, pytest |
+| Containers | Docker, GitHub Container Registry |
+| CI | GitHub Actions |
+| Security | Trivy image scanning, non-root container, read-only root filesystem, dropped Linux capabilities |
+| Infrastructure as code | Terraform (kind provider, Helm provider) |
+| Orchestration | Kubernetes (kind), Helm |
+| CD / GitOps | ArgoCD (automated sync, prune, self-heal) |
+| Observability | Prometheus, Grafana, ServiceMonitor, PrometheusRule |
+
+## Repository layout
+
+```
+app/                    Flask service, tests, Dockerfile
+helm/demo-app/          Helm chart (Deployment, Service, ServiceMonitor, PrometheusRule)
+argocd/                 ArgoCD Application manifest
+terraform/              kind cluster + ArgoCD + monitoring stack
+scripts/                helper scripts (load test, configuration)
+.github/workflows/      CI pipeline
+```
+
+## Screenshots
+
+![ArgoCD application synced and healthy](docs/argocd-synced.png)
+![Grafana request rate](docs/grafana-metrics.png)
+![CI pipeline run](docs/ci-green.png)
+
+## Running it yourself
+
+**Requirements:** Docker, Terraform 1.5+, kubectl, git, a GitHub account. About 8 GB of RAM and 20 GB of free disk.
+
+1. Fork this repository and replace `swarup182000` with your GitHub username in `helm/demo-app/values.yaml` and `argocd/application.yaml`.
+2. In the repo settings, give Actions **read and write** permissions, then push a change to `app/` so CI builds the first image.
+3. Set the published container package to **public** so the cluster can pull it without credentials.
+4. Create the cluster and platform components:
    ```bash
-   ./scripts/configure.sh <apna-github-username>
-   git init && git add . && git commit -m "initial commit"
-   git branch -M main
-   git remote add origin https://github.com/<username>/devops-gitops-demo.git
-   git push -u origin main
+   cd terraform
+   terraform init
+   terraform apply -auto-approve
+   export KUBECONFIG=$(pwd)/devops-demo-config
    ```
-3. Repo Settings -> Actions -> General -> Workflow permissions -> **Read and write** select karo.
+5. Deploy the application through ArgoCD:
+   ```bash
+   kubectl apply -f ../argocd/application.yaml
+   kubectl get pods -n demo
+   curl http://localhost:8080/
+   ```
+6. Open the dashboards:
+   ```bash
+   # ArgoCD (user: admin)
+   kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+   kubectl port-forward svc/argocd-server -n argocd 8081:443
 
-### 2. CI chalao (20 min)
-- Actions tab mein `ci` workflow dekho: test -> Trivy scan -> image push -> `values.yaml` mein tag auto-update.
-- Ho jaye to GitHub profile -> Packages -> `devops-gitops-demo` -> Package settings -> visibility **Public** karo (warna kind image pull nahi kar payega).
-- `git pull` karo taaki CI ka tag-update commit local mein aa jaye.
+   # Grafana (user: admin)
+   kubectl get secret monitoring-grafana -n monitoring -o jsonpath="{.data.admin-password}" | base64 -d
+   kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80
+   ```
+7. Generate traffic with `./scripts/loadtest.sh` and query `rate(app_requests_total[1m])` in Grafana Explore.
 
-### 3. Terraform se cluster (30-40 min)
-```bash
-cd terraform
-terraform init
-terraform apply -auto-approve
-kubectl get nodes
-```
-Isse kind cluster + ArgoCD + Prometheus/Grafana install ho jayenge.
+To tear everything down: `cd terraform && terraform destroy -auto-approve`.
 
-### 4. App ArgoCD se deploy karo (15 min)
-```bash
-kubectl apply -f argocd/application.yaml
-kubectl get pods -n demo -w
-curl http://localhost:8080/
-```
+## Things to try
 
-### 5. ArgoCD UI
-```bash
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
-kubectl port-forward svc/argocd-server -n argocd 8081:443
-```
-Browser: https://localhost:8081 (user: `admin`).
+- **Auto-deploy:** change the message in `app/app.py`, push, and watch CI and ArgoCD roll it out.
+- **Self-heal:** run `kubectl scale deploy demo-app -n demo --replicas=5` and watch ArgoCD bring it back to 2.
+- **Rollback:** `git revert` the last deployment commit and push.
+- **Alerting:** scale the deployment to 0 (with self-heal disabled) to fire the `DemoAppDown` alert.
+- **Security gate:** switch the Dockerfile to an old base image and see whether Trivy blocks the build.
 
-### 6. Grafana / Prometheus (30 min)
-```bash
-kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80
-```
-Browser: http://localhost:3000 (user `admin`, password `prom-operator`).
-Explore -> Prometheus mein query: `rate(app_requests_total[1m])`. Traffic ke liye `./scripts/loadtest.sh` chalao.
-Dashboards mein "Kubernetes / Compute Resources / Namespace (Pods)" mein `demo` namespace dekho.
+## Problems I ran into
 
-### 7. GitOps ka asli demo (1 ghanta)
-- **Auto-deploy:** `app/app.py` mein message badlo, push karo -> CI -> naya tag -> ArgoCD auto-sync -> `curl localhost:8080`.
-- **Self-heal:** `kubectl scale deploy demo-app -n demo --replicas=5` -> ArgoCD wapas 2 kar dega.
-- **Rollback:** `git revert <commit>` -> push -> ArgoCD purana version laa dega.
-- **Alert:** `kubectl scale deploy demo-app -n demo --replicas=0` (ArgoCD self-heal band karne ke liye pehle Application mein `selfHeal: false` kar do) -> Prometheus Alerts mein `DemoAppDown` firing dikhega.
-- **Security gate:** Dockerfile mein purani base image (jaise `python:3.8`) daalo -> Trivy CI fail karega. Screenshot lo.
+These were the most useful part of the project, so I am keeping them here.
 
-### 8. Cleanup
-```bash
-cd terraform && terraform destroy -auto-approve
-```
+- **Disk full on the default 8 GB volume.** Docker images, the kind nodes and the Prometheus stack filled the disk. The first `terraform apply` failed with confusing `connection reset` and `no space left on device` errors. I resized the EBS volume to 30 GB, grew the partition and filesystem, and rebuilt the cluster.
+- **Terraform state out of sync with reality.** After the failed run, Terraform's state referenced a kind cluster that no longer existed, and half-created containers blocked a fresh apply ("node(s) already exist"). I removed the leftover containers and the stale state file before re-applying.
+- **Pinned GitHub Action no longer resolvable.** The pinned `aquasecurity/trivy-action` version could not be found, which broke the pipeline. I replaced it with running the official Trivy Docker image directly in the workflow.
+- **Race condition in the CI commit step.** The job that writes the new image tag back to Git was rejected when another commit landed on `main` in the meantime. Adding `git pull --rebase` before `git push` fixed it.
+- **Tooling gotchas.** Learned the hard way that `kubectl`/`terraform` need the right `KUBECONFIG`, that tmux helps with long applies over SSH, and that SSH tunnels are a safer way to reach dashboards than opening ports in the security group.
 
-## Troubleshooting
-- `ImagePullBackOff`: GHCR package public nahi hai, ya `values.yaml` mein username galat hai.
-- ArgoCD Application `OutOfSync` aur CRD error: monitoring install poora hone do (`kubectl get pods -n monitoring`), phir retry.
-- Port 8080 busy: `terraform/main.tf` mein `host_port` badlo.
-- Terraform apply ke time helm timeout: dobara `terraform apply` chalao.
+## What I would improve next
 
-## Resume bullets (apne actual results ke hisaab se edit karna)
-- Built GitOps CI/CD pipeline using GitHub Actions and ArgoCD deploying a containerized Flask service to Kubernetes via Helm.
-- Provisioned cluster, ArgoCD and monitoring stack as code with Terraform.
-- Integrated Trivy image scanning as a CI quality gate and hardened pods (non-root, read-only filesystem, dropped capabilities).
-- Implemented Prometheus metrics, ServiceMonitor and alert rules with Grafana dashboards.
-
-## Interview mein bolne ke points
-- Push vs pull deployment (CI push karta hai image, ArgoCD pull karta hai state).
-- Git ek single source of truth hai, rollback = `git revert`.
-- Self-heal kya hota hai aur drift kaise detect hota hai.
-- Shift-left security: scan pipeline mein, deploy se pehle.
+- Replace `kind` with a managed cluster (EKS) provisioned by Terraform, with remote state in S3.
+- Add an ingress controller and TLS instead of NodePort and port-forwarding.
+- Manage secrets with External Secrets or Vault.
+- Add Kyverno or OPA policies and pin the Trivy version.
+- Ship a prebuilt Grafana dashboard as code.
