@@ -1,0 +1,10 @@
+replicaCount: 2
+image:
+  repository: ghcr.io/swarup182000/devops-gitops-demo
+  tag: latest
+  pullPolicy: IfNotPresent
+service:
+  nodePort: 30080
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 200m, memory: 128Mi}
